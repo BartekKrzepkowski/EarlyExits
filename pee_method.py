@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from utils import correct_metric
 
-class PFEE(torch.nn.Module):
+class PEE(torch.nn.Module):
     def __init__(self, backbone_model, layers_dim, confidence_threshold, device):
         super().__init__()
         self.device = device
@@ -17,31 +17,23 @@ class PFEE(torch.nn.Module):
 
         median_dim = int(np.median(layers_dim))
         print(median_dim)
-        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Linear(dim, median_dim) for dim in layers_dim])
-        self.learners = torch.nn.ModuleList([torch.nn.Linear(median_dim, median_dim) for _ in layers_dim])
-        self.adaptive_balance = torch.nn.ModuleList([torch.nn.Linear(median_dim, 1) for dim in layers_dim])
+        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.Linear(dim, median_dim),
+                                                                           torch.nn.ReLU(),
+                                                                           torch.nn.Linear(median_dim, median_dim))
+                                                       for dim in layers_dim])
 
         #kazda strategia konkatenacji wymaga innego rozmiaru wejścia
         self.reduction_layers_past = torch.nn.ModuleList([torch.nn.Linear(median_dim * (i + 1), median_dim)
                                                      for i in range(self.n_layers)])
-        self.reduction_layers_future = torch.nn.ModuleList([torch.nn.Linear(median_dim * (i + 1), median_dim)
-                                                     for i in range(self.n_layers)])
+
         self.inc_strategy = self.concatenation
-        self.cosine_loss = torch.nn.CosineEmbeddingLoss(margin=0.0, size_average=None, reduce=None, reduction='mean')
 
 
-    def concatenation(self, layers_states, direction):
+    def concatenation(self, layers_states):
         concat_repr = torch.cat(layers_states, dim=-1)
         nb = len(layers_states) - 1
-        if direction == 'past':
-            inc_state = self.reduction_layers_past[nb](concat_repr)
-        elif direction == 'future':
-            inc_state = self.reduction_layers_future[nb](concat_repr)
+        inc_state = self.reduction_layers_past[nb](concat_repr)
         return inc_state
-
-    # def cosine_loss(self, y_true, y_pred):
-    #     cosine_sim = y_true.T @ y_pred / (torch.linalg.norm(y_pred, dim=-1) * torch.linalg.norm(y_true, dim=-1))
-    #     return 1 - cosine_sim
 
     def run_train(self, x_true, y_true):
         '''
@@ -60,27 +52,9 @@ class PFEE(torch.nn.Module):
             state = self.branch_classifiers[i](adj_repr_i)
             layers_states.append(state)
 
-        o_loss = ce_loss = .0
+        ce_loss = .0
         for i in range(self.n_layers-1):
-            s_pi = self.inc_strategy(layers_states[: i+1], 'past')
-
-            imit_states = []
-            imit_loss = 0
-            state_i = layers_states[i]
-            for j in range(i+1, self.n_layers):
-                approx_state_j = self.learners[j](state_i)
-                imit_states.append(approx_state_j)
-                state_j = layers_states[j]
-                # print(state_j.shape, approx_state_j.shape)
-                sim_loss = self.cosine_loss(state_j, approx_state_j, torch.ones(y_true.shape).to(self.device))
-                imit_loss += sim_loss
-            f_si = self.inc_strategy(imit_states, 'future')
-
-            imit_loss /= (self.n_layers - i - 1)
-            o_loss += imit_loss
-
-            balance = torch.sigmoid(self.adaptive_balance[i](s_pi))
-            z_i = balance * s_pi + (1 - balance) * f_si
+            z_i = self.inc_strategy(layers_states[: i+1])
             ce_loss_i = self.loss_ce(z_i, y_true)
 
             ce_loss += (i+1) * ce_loss_i # upewnij się co do indeksowania
@@ -89,14 +63,14 @@ class PFEE(torch.nn.Module):
             bcs_correct[i] = correct_metric(z_i, y_true)
 
         # the last layer doesn't need imitation
-        z_last = self.inc_strategy(layers_states, 'past')
+        z_last = self.inc_strategy(layers_states)
         ce_loss_last = self.loss_ce(z_last, y_true)
         ce_loss += self.n_layers * ce_loss_last
 
         bcs_loss[self.n_layers-1] = ce_loss_last.item() * y_true.size(0) # by nastepnie podzielić przez wspólny mianownik
         bcs_correct[self.n_layers-1] = correct_metric(z_last, y_true)
 
-        loss = o_loss / (self.n_layers - 1) + ce_loss / self.w_denom
+        loss = ce_loss / self.w_denom
         correct = correct_metric(z_last, y_true)
         return loss, correct, bcs_loss, bcs_correct
 
@@ -111,18 +85,9 @@ class PFEE(torch.nn.Module):
             adj_repr_i = self.backbone_model.adjust_repr(repr_i)
             state_i = self.branch_classifiers[i](adj_repr_i)# head_output
             layers_states.append(state_i)
-            s_pi = self.inc_strategy(layers_states[: i+1], 'past')
+            z_i = self.inc_strategy(layers_states[: i+1])
 
-            imit_states = []
-            for j in range(i+1, self.n_layers):
-                approx_state_j = self.learners[j](state_i)
-                imit_states.append(approx_state_j)
-            f_si = self.inc_strategy(imit_states, 'future')
-
-            balance = torch.sigmoid(self.adaptive_balance[i](s_pi))
-            z_i = balance * s_pi + (1 - balance) * f_si # head_output global
             p_i = F.softmax(z_i, dim=-1)
-
             head_confidences = self.entropy(p_i)
             # early exiting masks
             unresolved_samples_mask = sample_exited_at == -1
@@ -158,7 +123,7 @@ class PFEE(torch.nn.Module):
             adj_repr_last = self.backbone_model.adjust_repr(repr_last)
             state_last = self.branch_classifiers[-1](adj_repr_last)# head_output
             layers_states.append(state_last)
-            z_last = self.inc_strategy(layers_states, 'past')
+            z_last = self.inc_strategy(layers_states)
 
         outputs = torch.stack(sample_outputs).to(self.device)
         ce_loss = self.loss_ce(outputs, y_true)
