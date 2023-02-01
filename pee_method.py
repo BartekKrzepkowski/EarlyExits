@@ -5,32 +5,30 @@ import torch.nn.functional as F
 from utils import correct_metric
 
 class PEE(torch.nn.Module):
-    def __init__(self, backbone_model, layers_dim, confidence_threshold, device):
+    def __init__(self, backbone_model, layers_dim, confidence_threshold, num_classes, device):
         super().__init__()
         self.device = device
         self.confidence_threshold = confidence_threshold
         self.n_layers = len(layers_dim)
-        self.w_denom = self.n_layers * (self.n_layers + 1) / 2
+        self.weight_normalizer = self.n_layers * (self.n_layers + 1) / 2
 
         self.backbone_model = backbone_model
         self.loss_ce = torch.nn.CrossEntropyLoss()
 
         median_dim = int(np.median(layers_dim))
-        print(median_dim)
-        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Sequential(torch.nn.Linear(dim, median_dim),
-                                                                           torch.nn.ReLU(),
-                                                                           torch.nn.Linear(median_dim, median_dim))
-                                                       for dim in layers_dim])
+        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Linear(dim, num_classes) for dim in layers_dim])
 
         #kazda strategia konkatenacji wymaga innego rozmiaru wejścia
-        self.reduction_layers_past = torch.nn.ModuleList([torch.nn.Linear(median_dim * (i + 1), median_dim)
+        self.reduction_layers_past = torch.nn.ModuleList([torch.nn.Linear(num_classes * (i + 1), num_classes)
                                                      for i in range(self.n_layers)])
-
         self.inc_strategy = self.concatenation
 
 
     def concatenation(self, layers_states):
-        concat_repr = torch.cat(layers_states, dim=-1)
+        try:
+            concat_repr = torch.cat(layers_states, dim=-1)
+        except:
+            print(len(layers_states))
         nb = len(layers_states) - 1
         inc_state = self.reduction_layers_past[nb](concat_repr)
         return inc_state
@@ -53,24 +51,25 @@ class PEE(torch.nn.Module):
             layers_states.append(state)
 
         ce_loss = .0
-        for i in range(self.n_layers-1):
-            z_i = self.inc_strategy(layers_states[: i+1])
-            ce_loss_i = self.loss_ce(z_i, y_true)
-
-            ce_loss += (i+1) * ce_loss_i # upewnij się co do indeksowania
-
-            bcs_loss[i] = ce_loss_i.item() * y_true.size(0) # by nastepnie podzielić przez wspólny mianownik
-            bcs_correct[i] = correct_metric(z_i, y_true)
+        # for i in range(self.n_layers-1):
+        #     z_i = self.inc_strategy(layers_states[: i+1])
+        #     ce_loss_i = self.loss_ce(z_i, y_true)
+        #
+        #     ce_loss += (i+1) * ce_loss_i # upewnij się co do indeksowania
+        #
+        #     bcs_loss[i] = ce_loss_i.item() * y_true.size(0) # by nastepnie podzielić przez wspólny mianownik
+        #     bcs_correct[i] = correct_metric(z_i, y_true)
 
         # the last layer doesn't need imitation
-        z_last = self.inc_strategy(layers_states)
+        # z_last = self.inc_strategy(layers_states)
+        z_last = layers_states[-1]
         ce_loss_last = self.loss_ce(z_last, y_true)
         ce_loss += self.n_layers * ce_loss_last
 
         bcs_loss[self.n_layers-1] = ce_loss_last.item() * y_true.size(0) # by nastepnie podzielić przez wspólny mianownik
         bcs_correct[self.n_layers-1] = correct_metric(z_last, y_true)
 
-        loss = ce_loss / self.w_denom
+        loss = ce_loss / self.weight_normalizer
         correct = correct_metric(z_last, y_true)
         return loss, correct, bcs_loss, bcs_correct
 
@@ -86,6 +85,7 @@ class PEE(torch.nn.Module):
             state_i = self.branch_classifiers[i](adj_repr_i)# head_output
             layers_states.append(state_i)
             z_i = self.inc_strategy(layers_states[: i+1])
+            z_i = state_i
 
             p_i = F.softmax(z_i, dim=-1)
             head_confidences = self.entropy(p_i)
@@ -124,6 +124,12 @@ class PEE(torch.nn.Module):
             state_last = self.branch_classifiers[-1](adj_repr_last)# head_output
             layers_states.append(state_last)
             z_last = self.inc_strategy(layers_states)
+
+            exit_mask_global = unresolved_samples_mask
+            sample_exited_at[exit_mask_global] = head_idx
+            exit_indices_global = exit_mask_global.nonzero().view(-1).tolist()
+            for j, k in enumerate(exit_indices_global):
+                sample_outputs[k] = z_last[j]
 
         outputs = torch.stack(sample_outputs).to(self.device)
         ce_loss = self.loss_ce(outputs, y_true)

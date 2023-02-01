@@ -10,7 +10,7 @@ from pee_method import PEE
 from resnets import ResNet18
 
 EPOCHS = 5
-BATCH_SIZE = 4
+BATCH_SIZE = 128
 GRAD_ACCUM_STEPS = 128 // BATCH_SIZE
 
 from datasets import get_cifar10

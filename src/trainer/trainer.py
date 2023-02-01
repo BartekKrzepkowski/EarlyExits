@@ -4,7 +4,7 @@ from collections import defaultdict
 
 import torch
 import torch.nn.functional as F
-from tqdm.auto import tqdm
+from tqdm import tqdm, trange
 
 import wandb
 from logger import WandbLogger
@@ -26,8 +26,6 @@ class EarlyExitTrainer(object):
     def run_exp(self, epoch_start, epoch_end, exp_name, config_run_epoch, temp=1.0, random_seed=42):
         """
         Main method of trainer.
-        Init df -> [Init Run -> [Run Epoch]_{IL} -> Update df]_{IL}]
-        {IL - In Loop}
         Args:
             epoch_start (int): A number representing the beginning of run
             epoch_end (int): A number representing the end of run
@@ -37,7 +35,8 @@ class EarlyExitTrainer(object):
             random_seed (int): Seed generator
         """
         save_path = self.at_exp_start(exp_name, random_seed)
-        for epoch in tqdm(range(epoch_start, epoch_end), desc='run_exp'):
+        for epoch in trange(epoch_start, epoch_end, desc='run_exp'):
+            wandb.log({'epoch': epoch}, step=epoch)
             self.ee_method.train()
             self.run_epoch(epoch, save_path, config_run_epoch, phase='train')
             self.ee_method.eval()
@@ -78,23 +77,25 @@ class EarlyExitTrainer(object):
             config_run_epoch (): ##
             phase (train|test): Phase of training
         """
-        global_loss = 0.0
-        global_correct = 0.0 # w przypadku train correct z ostatniej warstwy, w p.p. correct z warstw wyjścia
-        global_denom = 0.0
+        epoch_loss = 0.0
+        epoch_correct = 0.0 # w przypadku train correct z ostatniej warstwy, w p.p. correct z warstw wyjścia
+        epoch_denom = 0.0
         running_loss = 0.0
         running_correct = 0.0
         running_denom = 0.0
         if phase == 'train':
             running_bcs_loss = {}
             running_bcs_correct = {}
-            global_bcs_loss = {}
-            global_bcs_correct = {}
+            epoch_bcs_loss = {}
+            epoch_bcs_correct = {}
+
         loader_size = len(self.loaders[phase])
-        wandb.log({'epoch': epoch})
+        global_step = epoch * loader_size
         progress_bar = tqdm(self.loaders[phase], desc=f'run_epoch: {phase}',
                             mininterval=30, leave=False, total=loader_size)
         for i, data in enumerate(progress_bar):
-            wandb.log({'step': i}, step=i+1)
+            global_step += 1
+            wandb.log({f'step/{phase}': i}, step=global_step)
             x_true, y_true = data
             # with torch.autocast(device_type=self.device, dtype=torch.float16):
             if 'train' in phase:
@@ -104,7 +105,7 @@ class EarlyExitTrainer(object):
                 if (i + 1) % config_run_epoch.grad_accum_steps == 0 or (i + 1) == loader_size:
                     # self.accelerator.clip_grad_norm_(filter(lambda p: p.requires_grad, self.ee_method.parameters()), 3.0)
                     self.optim.step()
-                    if self.lr_scheduler is not None:
+                    if self.lr_scheduler is not None: # na pewno w tym miejscu?
                         self.lr_scheduler.step()
                     self.optim.zero_grad()
                 loss *= config_run_epoch.grad_accum_steps
@@ -122,43 +123,50 @@ class EarlyExitTrainer(object):
             if (i + 1) % config_run_epoch.grad_accum_steps * config_run_epoch.running_step_mult == 0 or (i + 1) == loader_size:
                 tmp_loss = running_loss / running_denom
                 tmp_acc = running_correct / running_denom
-                losses = {f'ee_loss/running/{phase}': round(tmp_loss, 4), f'ee_acc/running/{phase}': round(tmp_acc, 4)}
+                losses = {f'running_{phase}/ee_loss': round(tmp_loss, 4), f'running_{phase}/ee_acc': round(tmp_acc, 4)}
                 progress_bar.set_postfix(losses)
-                wandb.log(losses, step=i+1)
+                wandb.log(losses, step=global_step)
+
+                # self.t_logger.log_scalar(f'running_loss/{phase}', losses[f'running_loss/{phase}'], global_step)
+                # self.t_logger.log_scalar(f'running_acc/{phase}', losses[f'running_acc/{phase}'], global_step)
 
                 if phase == 'train':
                     adjusted_running_bcs_loss = adjust_dict(running_bcs_loss, running_denom, 'loss', 'running')
                     adjusted_running_bcs_correct = adjust_dict(running_bcs_correct, running_denom, 'acc', 'running')
-                    wandb.log(adjusted_running_bcs_loss, step=i+1)
-                    wandb.log(adjusted_running_bcs_correct, step=i+1)
+                    wandb.log(adjusted_running_bcs_loss, step=global_step)
+                    wandb.log(adjusted_running_bcs_correct, step=global_step)
+                    epoch_bcs_loss = update_dict(epoch_bcs_loss, running_bcs_loss)
+                    epoch_bcs_correct = update_dict(epoch_bcs_correct, running_bcs_correct)
+                    running_bcs_loss = {}
+                    running_bcs_correct = {}
 
-                if self.lr_scheduler is not None:
-                    wandb.log({'lr_scheduler': self.lr_scheduler.get_last_lr()[0]}, step=i+1)
-
-                global_loss += running_loss
-                global_correct += running_correct
-                global_denom += running_denom
+                epoch_loss += running_loss
+                epoch_correct += running_correct
+                epoch_denom += running_denom
                 running_loss = 0.0
                 running_correct = 0.0
                 running_denom = 0.0
-                global_bcs_loss = update_dict(global_bcs_loss, running_bcs_loss)
-                global_bcs_correct = update_dict(global_bcs_correct, running_bcs_correct)
-                running_bcs_loss = {}
-                running_bcs_correct = {}
 
                 # if (i + 1) % config_run_epoch.save_interval == 0 or (i + 1) == loader_size:
                 #     self.save_model(save_path, i)
 
                 if (i + 1) == loader_size:
-                    tmp_loss = global_loss / global_denom
-                    tmp_acc = global_correct / global_denom
-                    global_losses = {f'ee_loss/global/{phase}': round(tmp_loss, 4), f'ee_acc/global/{phase}': round(tmp_acc, 4)}
+                    tmp_loss = epoch_loss / epoch_denom
+                    tmp_acc = epoch_correct / epoch_denom
+                    global_losses = {f'epoch_{phase}/ee_loss': round(tmp_loss, 4),
+                                     f'epoch_{phase}/ee_acc': round(tmp_acc, 4)}
+                    # t_logger.log_scalar(f'epoch_loss/{phase}', global_losses[f'epoch_loss/{phase}'], epoch)
+                    # t_logger.log_scalar(f'epoch_acc/{phase}', global_losses[f'epoch_acc/{phase}'], epoch)
                     wandb.log(global_losses, step=epoch)
                     if phase == 'train':
-                        adjusted_global_bcs_loss = adjust_dict(global_bcs_loss, running_denom, 'loss', 'global')
-                        adjusted_global_bcs_correct = adjust_dict(global_bcs_correct, running_denom, 'acc', 'global')
-                        wandb.log(adjusted_global_bcs_loss, step=i+1)
-                        wandb.log(adjusted_global_bcs_correct, step=i+1)
+                        adjusted_epoch_bcs_loss = adjust_dict(epoch_bcs_loss, epoch_denom, 'loss', 'epoch')
+                        adjusted_epoch_bcs_acc = adjust_dict(epoch_bcs_correct, epoch_denom, 'acc', 'epoch')
+                        wandb.log(adjusted_epoch_bcs_loss, step=epoch)
+                        wandb.log(adjusted_epoch_bcs_acc, step=epoch)
+
+                if self.lr_scheduler is not None and phase == 'train':
+                    # t_logger.log_scalar('lr_scheduler', self.lr_scheduler.get_last_lr()[0], global_step)
+                    wandb.log({'lr_scheduler': self.lr_scheduler.get_last_lr()[0]}, step=global_step)
 
 
     def save_model(self, path, step):
@@ -177,11 +185,13 @@ class EarlyExitTrainer(object):
         Args:
             random_seed (int): seed generator
         """
-        if 'cuda' in self.device.type:
-            torch.cuda.empty_cache()
-            torch.backends.cudnn.deterministic = True
-            torch.cuda.manual_seed_all(random_seed)
-            # torch.backends.cudnn.benchmark = False
+        import random
         import numpy as np
+        random.seed(random_seed)
         np.random.seed(random_seed)
         torch.manual_seed(random_seed)
+        if 'cuda' in self.device.type:
+            torch.cuda.empty_cache()
+            # torch.backends.cudnn.deterministic = True
+            torch.cuda.manual_seed_all(random_seed)
+            # torch.backends.cudnn.benchmark = False

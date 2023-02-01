@@ -4,8 +4,8 @@ import torch.nn.functional as F
 
 from utils import correct_metric
 
-class PFEE(torch.nn.Module):
-    def __init__(self, backbone_model, layers_dim, confidence_threshold, device):
+class GPFEE(torch.nn.Module):
+    def __init__(self, backbone_model, layers_dim, confidence_threshold, num_classes, device):
         super().__init__()
         self.device = device
         self.confidence_threshold = confidence_threshold
@@ -15,20 +15,17 @@ class PFEE(torch.nn.Module):
         self.backbone_model = backbone_model
         self.loss_ce = torch.nn.CrossEntropyLoss()
 
-        median_dim = int(np.median(layers_dim))
-        print(median_dim)
-        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Linear(dim, median_dim) for dim in layers_dim])
-        self.learners = torch.nn.ModuleList([torch.nn.Linear(median_dim, median_dim) for _ in layers_dim])
-        self.adaptive_balance = torch.nn.ModuleList([torch.nn.Linear(median_dim, 1) for dim in layers_dim])
+        self.branch_classifiers = torch.nn.ModuleList([torch.nn.Linear(dim, num_classes) for dim in layers_dim])
+        self.learners = torch.nn.ModuleList([torch.nn.Linear(num_classes, num_classes) for _ in layers_dim])
+        self.adaptive_balance = torch.nn.ModuleList([torch.nn.Linear(num_classes, 1) for _ in layers_dim])
 
-        #kazda strategia konkatenacji wymaga innego rozmiaru wejścia
-        self.reduction_layers_past = torch.nn.ModuleList([torch.nn.Linear(median_dim * (i + 1), median_dim)
+        # czy potrzebne są dwie wersje?
+        self.reduction_layers_past = torch.nn.ModuleList([torch.nn.Linear(num_classes * (i + 1), num_classes)
                                                      for i in range(self.n_layers)])
-        self.reduction_layers_future = torch.nn.ModuleList([torch.nn.Linear(median_dim * (i + 1), median_dim)
+        self.reduction_layers_future = torch.nn.ModuleList([torch.nn.Linear(num_classes * (i + 1), num_classes)
                                                      for i in range(self.n_layers)])
         self.inc_strategy = self.concatenation
         self.cosine_loss = torch.nn.CosineEmbeddingLoss(margin=0.0, size_average=None, reduce=None, reduction='mean')
-
 
     def concatenation(self, layers_states, direction):
         concat_repr = torch.cat(layers_states, dim=-1)
@@ -74,6 +71,7 @@ class PFEE(torch.nn.Module):
                 # print(state_j.shape, approx_state_j.shape)
                 sim_loss = self.cosine_loss(state_j, approx_state_j, torch.ones(y_true.shape).to(self.device))
                 imit_loss += sim_loss
+
             f_si = self.inc_strategy(imit_states, 'future')
 
             imit_loss /= (self.n_layers - i - 1)
@@ -97,7 +95,8 @@ class PFEE(torch.nn.Module):
         bcs_correct[self.n_layers-1] = correct_metric(z_last, y_true)
 
         loss = o_loss / (self.n_layers - 1) + ce_loss / self.w_denom
-        correct = correct_metric(z_last, y_true)
+        correct = bcs_correct[self.n_layers-1]
+
         return loss, correct, bcs_loss, bcs_correct
 
     def run_val(self, x_true, y_true):

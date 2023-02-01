@@ -1,3 +1,6 @@
+import os
+from datetime import datetime
+
 import torch
 from torch.nn import functional as F
 
@@ -36,21 +39,42 @@ def configure_optimizer(optim, backbone, head, lr_backbone, lr_head, weight_deca
     optimizer = optim(optimizer_grouped_parameters, **optim_kwargs)
     return optimizer
 
-def correct_metric(y_pred, y_true):
-    _, predicted = torch.max(y_pred.data, -1)
-    correct = (predicted == y_true).sum().item()
-    return correct
 
-def update_dict(d1, dd1):
-    if d1 == {}:
-        d1 = dd1
-    else:
-        for k in d1:
-            d1[k] += dd1[k]
+def adjust_evaluators(d1, dd2, denom, scope, phase):
+    for evaluator_key in dd2:
+        eval_key = str(evaluator_key).split('/')
+        eval_key = eval_key[0] if len(eval_key) == 1 else '/'.join(eval_key[:-1])
+        eval_key = eval_key.split('_')
+        eval_key = '_'.join(eval_key[1:]) if eval_key[0] in {'running', 'epoch'} else '_'.join(eval_key)
+        d1[f'{scope}_{eval_key}/{phase}'] += dd2[evaluator_key] * denom
     return d1
 
-def adjust_dict(d, nom, metric, scope):
-    new_d = {}
-    for k in d:
-        new_d[f'{scope}_{metric}/layer_{k}_training'] = d[k] / nom
-    return new_d
+
+def adjust_evaluators_pre_log(d1, denom, round_at=4):
+    d2 = {}
+    for k in d1:
+        d2[k] = round(d1[k] / denom, round_at)
+    return d2
+
+
+def update_tensor(a, b):
+    c = torch.cat([a, b])
+    return c
+
+
+def load_model(model, path):
+    model.load_state_dict(torch.load(path))
+    return model
+
+
+def create_paths(base_path, exp_name):
+    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_path = os.path.join(os.getcwd(), f'{base_path}/{exp_name}/{date}')
+    save_path = f'{base_path}/checkpoints'
+    return base_path, save_path
+
+
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super(AttrDict, self).__init__(*args, **kwargs)
+        self.__dict__ = self
