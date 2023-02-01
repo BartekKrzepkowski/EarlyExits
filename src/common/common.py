@@ -1,5 +1,6 @@
 import torch
 
+from src.models.confidence_metrics import entropy_confidence, max_prob_confidence
 from src.visualization.tensorboard_pytorch import TensorboardPyTorch
 from src.visualization.wandb_logger import WandbLogger
 
@@ -32,6 +33,11 @@ LOSS_NAME_MAP = {
     'ce': torch.nn.CrossEntropyLoss,
     'nll': torch.nn.NLLLoss,
     'mse': torch.nn.MSELoss
+}
+
+CONFIDENCE_METRIC_NAME_MAP = {
+    'entropy': entropy_confidence,
+    'max_prob': max_prob_confidence
 }
 
 

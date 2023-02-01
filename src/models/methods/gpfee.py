@@ -1,10 +1,10 @@
 from collections import defaultdict
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
 from src.common.common import ACT_NAME_MAP
+from src.common.common import CONFIDENCE_METRIC_NAME_MAP
 from src.models.metrics import acc_metric
 from src.models.models import StandardHead
 
@@ -14,6 +14,7 @@ class GPFEE(torch.nn.Module):
         super().__init__()
         self.device = config_ee['device']
         self.confidence_threshold = config_ee['confidence_threshold']
+        self.confidence_metric = CONFIDENCE_METRIC_NAME_MAP[config_ee['confidence_metric']]
         self.n_layers = len(layers_dim)
         self.loss_ce_reweight_normalizer = self.n_layers * (self.n_layers - 1) / 2 \
                                            + (0 if config_ee['is_model_frozen'] else self.n_layers)
@@ -99,7 +100,7 @@ class GPFEE(torch.nn.Module):
             i_loss += imitation_loss
 
             z_i = self.get_merged_layer_state(past_states[:i + 1] + future_states, i)
-            past_states[i] = past_states[i].detach()
+            # past_states[i] = past_states[i].detach()
 
             ce_loss_i = self.loss_ce(z_i, y_true)
 
@@ -169,21 +170,17 @@ class GPFEE(torch.nn.Module):
         acc = acc_metric(outputs, y_true)
 
         evaluators = defaultdict(float)
-        evaluators['ce_loss'] = ce_loss.item()
+        evaluators['overall_loss'] = ce_loss.item()
         evaluators['overall_acc'] = acc
 
         return evaluators, self.sample_exited_at
-
-    def entropy(self, p):
-        return - torch.sum(p * torch.log(p), dim=1) / np.log(p.size(-1))
     
     def find_exit(self, z_i, head_idx, is_last):
         p_i = F.softmax(z_i, dim=1)
-        head_confidences_i = self.entropy(p_i)
 
         unresolved_samples_mask = self.sample_exited_at == -1
         exit_mask_global = unresolved_samples_mask.clone()
-        exit_mask_local = (head_confidences_i <= self.confidence_threshold).cpu().squeeze(dim=-1)
+        exit_mask_local = self.confidence_metric(p_i, self.confidence_threshold).cpu().squeeze(dim=-1)
         if not is_last:
             exit_mask_global[unresolved_samples_mask] = exit_mask_local
             self.sample_exited_at[exit_mask_global] = head_idx
