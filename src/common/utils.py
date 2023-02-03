@@ -40,6 +40,10 @@ def configure_optimizer(optim, backbone, head, lr_backbone, lr_head, weight_deca
     return optimizer
 
 
+def clip_grad_norm(clip_grad_wrapper, model, clip_value):
+    clip_grad_wrapper(filter(lambda p: p.requires_grad, model.parameters()), clip_value)
+
+
 def adjust_evaluators(d1, dd2, denom, scope, phase):
     for evaluator_key in dd2:
         eval_key = str(evaluator_key).split('/')
@@ -67,10 +71,14 @@ def load_model(model, path):
     return model
 
 
+def save_model(model, path):
+    torch.save(model.state_dict(), path)
+
+
 def create_paths(base_path, exp_name):
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_path = os.path.join(os.getcwd(), f'{base_path}/{exp_name}/{date}')
-    save_path = f'{base_path}/checkpoints'
+    save_path = lambda step: f'{base_path}/checkpoints/model_step_{step}.pth'
     return base_path, save_path
 
 
