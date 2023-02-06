@@ -4,44 +4,39 @@ from datetime import datetime
 import torch
 from torch.nn import functional as F
 
+from src.common.common import OPTIMIZER_NAME_MAP, SCHEDULER_NAME_MAP
 
-def configure_optimizer(optim, backbone, head, lr_backbone, lr_head, weight_decay=1e-4, **optim_kwargs):
-    alert_chunks = ['embeddings', 'LayerNorm', 'bias']
-    no_decay = {pn for pn, p in backbone.named_parameters() if any(c in pn for c in alert_chunks)}
+
+def configure_optimizer(optim_wrapper, model, **optim_kwargs):
+    weight_decay = optim_kwargs['optim_kwargs']
+    del optim_kwargs['optim_kwargs']
+
+    alert_chunks = ['embeddings', 'bn.weight', 'bias']
+    no_decay = [pn for pn, p in model.named_parameters() if any(c in pn for c in alert_chunks)] # sprawdzić które nazwy wypisało
     optimizer_grouped_parameters = [
         {
-            "params": [p for pn, p in backbone.named_parameters() if pn not in no_decay and p.requires_grad],
+            "params": [p for pn, p in model.named_parameters() if pn not in no_decay and p.requires_grad],
             "weight_decay": weight_decay,
-            'lr': lr_backbone
         },
         {
-            "params": [p for pn, p in backbone.named_parameters() if pn in no_decay and p.requires_grad],
+            "params": [p for pn, p in model.named_parameters() if pn in no_decay and p.requires_grad],
             "weight_decay": 0.0,
-            'lr': lr_backbone
         },
     ]
-    if head is not None:
-        no_decay = {pn for pn, p in head.named_parameters() if any(c in pn for c in alert_chunks)}
-        optimizer_grouped_parameters2 = [
-            {
-                "params": [p for pn, p in head.named_parameters() if pn not in no_decay and p.requires_grad],
-                "weight_decay": weight_decay,
-                'lr': lr_head
-            },
-            {
-                "params": [p for pn, p in head.named_parameters() if pn in no_decay and p.requires_grad],
-                "weight_decay": 0.0,
-                'lr': lr_head
-            },
-        ]
-        optimizer_grouped_parameters += optimizer_grouped_parameters2
 
-    optimizer = optim(optimizer_grouped_parameters, **optim_kwargs)
+    optimizer = optim_wrapper(optimizer_grouped_parameters, **optim_kwargs)
     return optimizer
 
 
 def clip_grad_norm(clip_grad_wrapper, model, clip_value):
     clip_grad_wrapper(filter(lambda p: p.requires_grad, model.parameters()), clip_value)
+
+
+def prepare_optim_and_scheduler(model, optim_name, scheduler_name, optim_params, scheduler_params):
+    optim_wrapper = OPTIMIZER_NAME_MAP[optim_name]
+    optim = configure_optimizer(optim_wrapper, model, optim_params)
+    lr_scheduler = SCHEDULER_NAME_MAP[scheduler_name](optim, **scheduler_params)
+    return optim, lr_scheduler
 
 
 def adjust_evaluators(d1, dd2, denom, scope, phase):
@@ -78,7 +73,9 @@ def save_model(model, path):
 def create_paths(base_path, exp_name):
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_path = os.path.join(os.getcwd(), f'{base_path}/{exp_name}/{date}')
-    save_path = lambda step: f'{base_path}/checkpoints/model_step_{step}.pth'
+    save_path_base = f'{base_path}/checkpoints'
+    os.makedirs(save_path_base)
+    save_path = lambda step: f'{save_path_base}/model_step_{step}.pth'
     return base_path, save_path
 
 

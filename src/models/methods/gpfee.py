@@ -51,8 +51,8 @@ class GPFEE(torch.nn.Module):
         states = self.dropout_pre_inc(states).unsqueeze(-2)
         states_proj = states.matmul(self.reduction_layer_weight).squeeze(-2) + self.reduction_layer_bias
 
-        past_state = torch.mean(states_proj[:, :current_layer+1, :self.num_classes], dim=1)
-        future_state = torch.mean(states_proj[:, current_layer+1:, :self.num_classes], dim=1)
+        past_state = torch.mean(states_proj[:, :current_layer+1, :self.num_classes], dim=1) # suma zamiast mean
+        future_state = torch.mean(states_proj[:, current_layer+1:, :self.num_classes], dim=1) # suma zamiast mean
         prev_gate = torch.mean(states_proj[:, :current_layer+1, self.num_classes:], dim=1)
 
         if current_layer < self.n_layers - 1:
